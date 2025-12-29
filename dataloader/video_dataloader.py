@@ -153,16 +153,8 @@ class VideoDataset(data.Dataset):
         
         # --- Safety Check Added ---
         if len(video_frames_path) == 0:
-            print(f"Warning: No frames found for video {record.path}. Skipping or handling error.")
-            # Option: Return zero tensors or handle gracefully. 
-            # For now, let's create a dummy black image to avoid crashing, 
-            # or better, raise a more informative error so user knows data is bad.
-            # But to keep training running, let's try to reload a random sample or similar.
-            # Here, we will just replicate the logic but with a safe check for p.
-            # If absolutely empty, we can't do much. Let's assume data integrity is mostly ok 
-            # but maybe index p is slightly off.
-            # If really empty, raise error:
-            raise RuntimeError(f"Video folder is empty: {record.path}")
+            print(f"Warning: No frames found for video {record.path}. Skipping this sample.")
+            return None # Return None for the DataLoader to skip this sample
 
         num_frames_real = len(video_frames_path)
         
