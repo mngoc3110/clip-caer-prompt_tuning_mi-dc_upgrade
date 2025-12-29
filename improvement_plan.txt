@@ -1,0 +1,43 @@
+# Kế hoạch Nâng cấp CLIP-CAER lên 70% UAR
+
+Dưới đây là các thay đổi chi tiết cần thực hiện để đạt mục tiêu UAR Validation 70%.
+
+## 1. Cải tiến Kiến trúc Mô hình (Quan trọng nhất)
+Hiện tại: `GenerateModel` đang ghép nối đơn giản đặc trưng khuôn mặt và cơ thể (`torch.cat`).
+**Đề xuất: Cross-Attention Fusion**
+Thay vì ghép nối, hãy sử dụng cơ chế Attention để "trộn" thông tin ngữ cảnh vào khuôn mặt.
+
+*   **Cơ chế:**
+    *   Sử dụng đặc trưng khuôn mặt (Face Features) làm **Query (Q)**.
+    *   Sử dụng đặc trưng cơ thể/ngữ cảnh (Body Features) làm **Key (K)** và **Value (V)**.
+    *   Điều này cho phép mô hình "hỏi": *Với biểu cảm khuôn mặt này, phần nào của ngữ cảnh cơ thể là quan trọng để xác định cảm xúc?*
+*   **Vị trí thay đổi:** File `models/Generate_Model.py`, trong hàm `forward`.
+
+## 2. Nâng cấp Backbone & Config (File `train.sh`)
+Cấu hình hiện tại khá cơ bản và chưa khai thác hết sức mạnh của CLIP.
+
+*   **Backbone (CLIP Path):**
+    *   Hiện tại: `ViT-B/32` (Patch size 32x32 - quá thô cho biểu cảm vi mô).
+    *   Đề xuất: `ViT-B/16`. Patch size nhỏ hơn giúp bắt chi tiết mắt, miệng tốt hơn nhiều.
+    *   *Lưu ý:* Cần đảm bảo VRAM đủ (nếu thiếu bộ nhớ, giảm `batch-size` xuống 4 hoặc 6).
+
+*   **Epochs:**
+    *   Hiện tại: `20`.
+    *   Đề xuất: `50`. Prompt Tuning hội tụ chậm hơn fine-tuning, cần thời gian dài hơn để học các prompt tối ưu.
+
+*   **Learning Rate:**
+    *   Giữ nguyên `lr` cho prompt learner (`1e-3`), nhưng có thể giảm `lr` của image encoder xuống thấp hơn (`1e-6`) nếu chuyển sang `ViT-B/16` để tránh phá vỡ weight đã pre-train.
+
+## 3. Tăng cường Dữ liệu (File `dataloader/video_dataloader.py`)
+Mô hình cần học cách chống lại sự thay đổi ánh sáng và nhiễu để tổng quát hóa tốt hơn.
+
+*   **ColorJitter:** Thêm biến đổi màu sắc (độ sáng, tương phản, bão hòa).
+    *   Code: `transforms.ColorJitter(brightness=0.1, contrast=0.1, saturation=0.1, hue=0.05)`
+*   **Label Smoothing:**
+    *   Trong `train.sh`, tăng `--label-smoothing` từ `0.1` lên `0.2`. Điều này giúp mô hình bớt "tự tin thái quá" (overconfident), giảm overfitting.
+
+---
+## Tóm tắt các file cần sửa:
+1.  **`models/Generate_Model.py`**: Thêm class `CrossAttention` và sửa dòng ghép nối feature.
+2.  **`dataloader/video_dataloader.py`**: Thêm `ColorJitter` vào `train_transforms`.
+3.  **`train.sh`**: Sửa `--clip-path ViT-B/16`, `--epochs 50`, `--label-smoothing 0.2`.

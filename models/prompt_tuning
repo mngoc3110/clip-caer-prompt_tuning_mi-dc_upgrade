@@ -1,0 +1,96 @@
+# models/prompt_tuning.py
+import torch
+import torch.nn as nn
+import clip
+
+class PromptLearner(nn.Module):
+    """
+    Prompt tuning text-side cho CLIP:
+    - prompt template: "a student showing {desc} in learning state."
+    - learnable context tokens <ctx> chèn vào giữa "showing" và description
+    """
+
+    def __init__(self, clip_model, classnames, n_ctx=4, ctx_init=None, device="cuda"):
+        super().__init__()
+        self.clip = clip_model
+        self.dtype = clip_model.dtype
+        self.device = device
+
+        # classnames: list các mô tả ngữ nghĩa (descriptor)
+        # ví dụ: ["The student looks neutral and calm while learning.", ...]
+        self.classnames = classnames
+        self.n_cls = len(classnames)
+        self.n_ctx = n_ctx
+
+        # Template hard
+        self.template = "a student showing {} in learning state."
+
+        # ===== 1. Khởi tạo context =====
+        if ctx_init is not None:
+            # bạn có thể dùng một chuỗi như "a person in classroom" để init
+            print(f"Initializing context with: {ctx_init}")
+            with torch.no_grad():
+                # tokenize một prompt có ctx_init
+                tokenized = clip.tokenize(self.template.format(ctx_init)).to(device)
+                # (1,77,d)
+                embedding = self.clip.token_embedding(tokenized).type(self.dtype)
+            # lấy n_ctx token đầu (bỏ SOS) làm init
+            ctx_vectors = embedding[0, 1 : 1 + n_ctx, :]
+        else:
+            # random init
+            ctx_vectors = torch.empty(self.n_ctx, self.clip.text_projection.shape[0])
+            nn.init.normal_(ctx_vectors, std=0.02)
+        self.ctx = nn.Parameter(ctx_vectors)  # (n_ctx, d)
+
+        # ===== 2. Token hoá các prompt cứng cho từng lớp =====
+        # ví dụ: "a student showing The student looks neutral ... in learning state."
+        prompts = [self.template.format(name) for name in classnames]
+        print("\n🔎 Một vài prompt gốc (template):")
+        for i in range(min(3, len(prompts))):
+            print("  ", prompts[i])
+
+        # (C, 77)
+        tokenized = clip.tokenize(prompts).to(device)
+        self.register_buffer("tokenized_prompts", tokenized)
+
+    def construct_prompts(self, ctx):
+        """
+        ctx: (n_ctx,d)
+        Trả về token embedding (C,77,d) với phần context được thay bằng ctx.
+        """
+        ctx = ctx.unsqueeze(0).expand(self.n_cls, -1, -1)  # (C,n_ctx,d)
+        tokenized = self.tokenized_prompts  # (C,77)
+        with torch.no_grad():
+            embedding = self.clip.token_embedding(tokenized).type(self.dtype)  # (C,77,d)
+
+        # SOS = token đầu
+        sos = embedding[:, 0:1, :]           # (C,1,d)
+        rest = embedding[:, 1 + self.n_ctx :, :]  # phần còn lại sau context (C, 77-1-n_ctx, d)
+
+        # prompt = [SOS] + [CTX1..CTXn] + [rest...]
+        prompts = torch.cat([sos, ctx, rest], dim=1)  # (C,1+n_ctx+len_rest,d)
+        return prompts
+
+    def forward(self):
+        return self.construct_prompts(self.ctx)
+
+    def encode_text(self, clip_model):
+        """
+        Encode text prompt → text features (C,d)
+        """
+        prompts = self()               # (C,77,d)
+        x = prompts
+
+        # Giống code encode_text của CLIP nhưng dùng prompts đã thay ctx
+        x = x + clip_model.positional_embedding.type(self.dtype)
+        x = x.permute(1, 0, 2)        # (77,C,d)
+        x = clip_model.transformer(x)
+        x = x.permute(1, 0, 2)        # (C,77,d)
+        x = clip_model.ln_final(x).type(self.dtype)
+
+        # lấy token <EOT> vị trí của max token_id
+        tokenized = self.tokenized_prompts
+        eos_ind = tokenized.argmax(dim=-1)   # (C,)
+        x = x[torch.arange(x.shape[0]), eos_ind] @ clip_model.text_projection  # (C,d)
+
+        return x
